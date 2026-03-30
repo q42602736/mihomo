@@ -333,6 +333,10 @@ func loadProvider[T P.Provider](providers map[string]T) {
 					log.Errorln("initial rule provider %s error: %v", name, err)
 				}
 			}
+		} else {
+			if DefaultProviderLoadedHook != nil {
+				DefaultProviderLoadedHook(name)
+			}
 		}
 	}
 
