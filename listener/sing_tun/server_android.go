@@ -46,10 +46,34 @@ func getPackageManager() (tun.PackageManager, error) {
 	return globalPM, pmErr
 }
 
+func hasAndroidRules(tunOptions *tun.Options) bool {
+	return len(tunOptions.IncludeAndroidUser) > 0 ||
+		len(tunOptions.IncludePackage) > 0 ||
+		len(tunOptions.ExcludePackage) > 0
+}
+
+func needsPackageManager(tunOptions *tun.Options) bool {
+	return len(tunOptions.IncludePackage) > 0 ||
+		len(tunOptions.ExcludePackage) > 0
+}
+
 func (l *Listener) buildAndroidRules(tunOptions *tun.Options) error {
+	if !hasAndroidRules(tunOptions) {
+		return nil
+	}
+
+	if !needsPackageManager(tunOptions) {
+		tunOptions.BuildAndroidRules(nil, l.handler)
+		return nil
+	}
+
 	packageManager, err := getPackageManager()
 	if err != nil {
-		return err
+		log.Warnln("[Android TUN] initialize package manager failed, skip package rules: %v", err)
+		tunOptions.IncludePackage = nil
+		tunOptions.ExcludePackage = nil
+		tunOptions.BuildAndroidRules(nil, l.handler)
+		return nil
 	}
 	tunOptions.BuildAndroidRules(packageManager, l.handler)
 	return nil
