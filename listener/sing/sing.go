@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -29,6 +30,9 @@ import (
 )
 
 const UDPTimeout = 5 * time.Minute
+
+var tunTCPIngressLogCount atomic.Int32
+var tunUDPIngressLogCount atomic.Int32
 
 type ListenerConfig struct {
 	Tunnel     C.Tunnel
@@ -122,6 +126,16 @@ func (h *ListenerHandler) ParseSpecialFqdn(ctx context.Context, conn net.Conn, m
 func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	if h.IsSpecialFqdn(metadata.Destination.Fqdn) {
 		return h.ParseSpecialFqdn(ctx, conn, metadata)
+	}
+	if h.Type == C.TUN {
+		if count := tunTCPIngressLogCount.Add(1); count <= 20 {
+			log.Warnln(
+				"[AndroidTunDiag][Ingress][TCP][%d] %s -> %s",
+				count,
+				metadata.Source.String(),
+				metadata.Destination.String(),
+			)
+		}
 	}
 
 	if deadline.NeedAdditionalReadDeadline(conn) {
@@ -224,6 +238,16 @@ func (h *ListenerHandler) NewPacket(ctx context.Context, key netip.AddrPort, buf
 }
 
 func (h *ListenerHandler) handlePacket(ctx context.Context, cPacket *packet, source M.Socksaddr, destination M.Socksaddr) {
+	if h.Type == C.TUN {
+		if count := tunUDPIngressLogCount.Add(1); count <= 20 {
+			log.Warnln(
+				"[AndroidTunDiag][Ingress][UDP][%d] %s -> %s",
+				count,
+				source.String(),
+				destination.String(),
+			)
+		}
+	}
 	cMetadata := &C.Metadata{
 		NetWork: C.UDP,
 		Type:    h.Type,

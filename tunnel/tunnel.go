@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	syncatomic "sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -65,6 +66,9 @@ var (
 	sniffingEnable    = false
 
 	ruleUpdateCallback = utils.NewCallback[P.RuleProvider]()
+
+	androidTunDialErrCount uint32
+	androidTunDialOkCount  uint32
 )
 
 type tunnel struct{}
@@ -609,6 +613,24 @@ func logMetadataErr(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err
 	} else {
 		log.Warnln("[%s] dial %s (match %s/%s) %s --> %s error: %s", strings.ToUpper(metadata.NetWork.String()), proxy.Name(), rule.RuleType().String(), rule.Payload(), metadata.SourceDetail(), metadata.RemoteAddress(), err.Error())
 	}
+	if metadata.Type == C.TUN {
+		if count := syncatomic.AddUint32(&androidTunDialErrCount, 1); count <= 50 {
+			proxyName := "<nil>"
+			if proxy != nil {
+				proxyName = proxy.Name()
+			}
+			log.Warnln(
+				"[AndroidTunDiag][DialError][%d] network=%s process=%s uid=%d remote=%s proxy=%s err=%s",
+				count,
+				metadata.NetWork.String(),
+				metadata.Process,
+				metadata.Uid,
+				metadata.RemoteAddress(),
+				proxyName,
+				err.Error(),
+			)
+		}
+	}
 }
 
 func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
@@ -627,6 +649,19 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 		log.Infoln("[%s] %s --> %s using DIRECT", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
 	default:
 		log.Infoln("[%s] %s --> %s doesn't match any rule using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), remoteConn.Chains().String())
+	}
+	if metadata.Type == C.TUN {
+		if count := syncatomic.AddUint32(&androidTunDialOkCount, 1); count <= 20 {
+			log.Warnln(
+				"[AndroidTunDiag][DialOK][%d] network=%s process=%s uid=%d remote=%s chains=%s",
+				count,
+				metadata.NetWork.String(),
+				metadata.Process,
+				metadata.Uid,
+				metadata.RemoteAddress(),
+				remoteConn.Chains().String(),
+			)
+		}
 	}
 }
 
