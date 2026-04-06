@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"strings"
 
 	"github.com/metacubex/mihomo/component/geodata"
@@ -219,6 +220,11 @@ func NewGEOIP(country string, adapter string, isSrc, noResolveIP bool) (*GEOIP, 
 	if err := geodata.InitGeoIP(); err != nil {
 		log.Errorln("can't initial GeoIP: %s", err)
 		return nil, err
+	}
+
+	if runtime.GOOS == "ios" {
+		log.Infoln("Deferred initial GeoIP rule %s => %s on ios", country, adapter)
+		return geoip, nil
 	}
 
 	if geodata.GeodataMode() {

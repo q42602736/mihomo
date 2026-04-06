@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -44,6 +45,12 @@ import (
 )
 
 var mux sync.Mutex
+
+func freeMemoryIfIOS() {
+	if runtime.GOOS == "ios" {
+		debug.FreeOSMemory()
+	}
+}
 
 func readConfig(path string) ([]byte, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -99,14 +106,19 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
+	freeMemoryIfIOS()
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
+	freeMemoryIfIOS()
 	updateSniffer(cfg.Sniffer)
+	freeMemoryIfIOS()
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
 	updateNTP(cfg.NTP)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
+	freeMemoryIfIOS()
 	updateListeners(cfg.General, cfg.Listeners, force)
 	updateTun(cfg.General) // tun should not care "force"
+	freeMemoryIfIOS()
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
 
@@ -114,9 +126,12 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	initInnerTcp()
 	loadProvider(cfg.Providers)
+	freeMemoryIfIOS()
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
+	freeMemoryIfIOS()
 	runtime.GC()
+	freeMemoryIfIOS()
 	tunnel.OnRunning()
 	updateUpdater(cfg)
 
@@ -338,6 +353,14 @@ func loadProvider[T P.Provider](providers map[string]T) {
 				DefaultProviderLoadedHook(name)
 			}
 		}
+	}
+
+	if runtime.GOOS == "ios" {
+		for _, pv := range providers {
+			load(pv)
+			freeMemoryIfIOS()
+		}
+		return
 	}
 
 	wg := sync.WaitGroup{}

@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/metacubex/mihomo/component/geodata"
 	_ "github.com/metacubex/mihomo/component/geodata/memconservative"
@@ -71,6 +72,11 @@ func NewGEOSITE(country string, adapter string) (*GEOSITE, error) {
 		Base:    Base{},
 		country: country,
 		adapter: adapter,
+	}
+
+	if runtime.GOOS == "ios" {
+		log.Infoln("Deferred initial GeoSite rule %s => %s on ios", country, adapter)
+		return geoSite, nil
 	}
 
 	matcher, err := geoSite.GetDomainMatcher() // test load

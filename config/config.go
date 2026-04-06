@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 	_ "unsafe"
@@ -600,16 +602,35 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 	return rawCfg, nil
 }
 
+func isIOSLowMemoryParse() bool {
+	return runtime.GOOS == "ios"
+}
+
+func forceIOSParseGC() {
+	if isIOSLowMemoryParse() {
+		debug.FreeOSMemory()
+	}
+}
+
+func logIOSParseStage(format string, args ...any) {
+	if isIOSLowMemoryParse() {
+		log.Infoln("[PacketTunnel][tun][parse] "+format, args...)
+	}
+}
+
 func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	config := &Config{}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()
+	forceIOSParseGC()
 
+	logIOSParseStage("parse general")
 	general, err := parseGeneral(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.General = general
+	logIOSParseStage("parse general done")
 
 	// We need to temporarily apply some configuration in general and roll back after parsing the complete configuration.
 	// The loading and downloading of geodata in the parseRules and parseRuleProviders rely on these.
@@ -617,100 +638,154 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	rollback := temporaryUpdateGeneral(config.General)
 	defer rollback()
 
+	logIOSParseStage("parse controller")
 	controller, err := parseController(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Controller = controller
+	logIOSParseStage("parse controller done")
 
+	logIOSParseStage("parse experimental")
 	experimental, err := parseExperimental(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Experimental = experimental
+	logIOSParseStage("parse experimental done")
 
+	logIOSParseStage("parse iptables")
 	iptables, err := parseIPTables(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.IPTables = iptables
+	logIOSParseStage("parse iptables done")
 
+	logIOSParseStage("parse ntp")
 	ntpCfg, err := parseNTP(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.NTP = ntpCfg
+	logIOSParseStage("parse ntp done")
 
+	logIOSParseStage("parse profile")
 	profile, err := parseProfile(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Profile = profile
+	logIOSParseStage("parse profile done")
 
+	logIOSParseStage("parse tls")
 	tlsCfg, err := parseTLS(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.TLS = tlsCfg
+	logIOSParseStage("parse tls done")
 
+	logIOSParseStage("parse proxies")
 	proxies, providers, err := parseProxies(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Proxies = proxies
 	config.Providers = providers
+	rawCfg.Proxy = nil
+	rawCfg.ProxyGroup = nil
+	rawCfg.ProxyProvider = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse proxies done")
 
+	logIOSParseStage("parse listeners")
 	listeners, err := parseListeners(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Listeners = listeners
+	rawCfg.Listeners = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse listeners done")
 
 	log.Infoln("Geodata Loader mode: %s", geodata.LoaderName())
 	log.Infoln("Geosite Matcher implementation: %s", geodata.SiteMatcherName())
+	logIOSParseStage("parse rule-providers")
 	ruleProviders, err := parseRuleProviders(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.RuleProviders = ruleProviders
+	rawCfg.RuleProvider = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse rule-providers done")
 
+	logIOSParseStage("parse sub-rules")
 	subRules, err := parseSubRules(rawCfg, proxies, ruleProviders)
 	if err != nil {
 		return nil, err
 	}
 	config.SubRules = subRules
+	rawCfg.SubRules = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse sub-rules done")
 
+	logIOSParseStage("parse rules")
 	rules, err := parseRules(rawCfg.Rule, proxies, ruleProviders, subRules, "rules")
 	if err != nil {
 		return nil, err
 	}
 	config.Rules = rules
+	rawCfg.Rule = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse rules done")
 
+	logIOSParseStage("parse hosts")
 	hosts, err := parseHosts(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Hosts = hosts
+	rawCfg.Hosts = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse hosts done")
 
 	parseIPV6(rawCfg) // must before DNS and Tun
 
+	logIOSParseStage("parse dns")
 	dnsCfg, err := parseDNS(rawCfg, ruleProviders)
 	if err != nil {
 		return nil, err
 	}
 	config.DNS = dnsCfg
+	rawCfg.DNS = RawDNS{}
+	rawCfg.Profile = RawProfile{}
+	forceIOSParseGC()
+	logIOSParseStage("parse dns done")
 
+	logIOSParseStage("parse tun")
 	err = parseTun(rawCfg.Tun, dnsCfg, config.General)
 	if err != nil {
 		return nil, err
 	}
+	rawCfg.Tun = RawTun{}
+	forceIOSParseGC()
+	logIOSParseStage("parse tun done")
 
+	logIOSParseStage("parse tuic-server")
 	err = parseTuicServer(rawCfg.TuicServer, config.General)
 	if err != nil {
 		return nil, err
 	}
+	rawCfg.TuicServer = RawTuicServer{}
+	forceIOSParseGC()
+	logIOSParseStage("parse tuic-server done")
 
 	config.Users = parseAuthentication(rawCfg.Authentication)
+	rawCfg.Authentication = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse authentication done")
 
 	config.Tunnels = rawCfg.Tunnels
 	// verify tunnels
@@ -721,11 +796,18 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 			}
 		}
 	}
+	rawCfg.Tunnels = nil
+	forceIOSParseGC()
+	logIOSParseStage("parse tunnels done")
 
+	logIOSParseStage("parse sniffer")
 	config.Sniffer, err = parseSniffer(rawCfg.Sniffer, ruleProviders)
 	if err != nil {
 		return nil, err
 	}
+	rawCfg.Sniffer = RawSniffer{}
+	forceIOSParseGC()
+	logIOSParseStage("parse sniffer done")
 
 	elapsedTime := time.Since(startTime) / time.Millisecond                     // duration in ms
 	log.Infoln("Initial configuration complete, total time: %dms", elapsedTime) //Segment finished in xxm
@@ -885,6 +967,10 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		proxies[proxy.Name()] = proxy
 		proxyList = append(proxyList, proxy.Name())
 		AllProxies = append(AllProxies, proxy.Name())
+		if isIOSLowMemoryParse() {
+			proxiesConfig[idx] = nil
+			forceIOSParseGC()
+		}
 	}
 
 	// keep the original order of ProxyGroups in config file
@@ -918,6 +1004,10 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 
 		providersMap[name] = pd
 		AllProviders = append(AllProviders, name)
+		if isIOSLowMemoryParse() {
+			delete(providersConfig, name)
+			forceIOSParseGC()
+		}
 	}
 
 	slices.Sort(AllProxies)
@@ -936,6 +1026,10 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		}
 
 		proxies[groupName] = adapter.NewProxy(group)
+		if isIOSLowMemoryParse() {
+			groupsConfig[idx] = nil
+			forceIOSParseGC()
+		}
 	}
 
 	var ps []C.Proxy
@@ -981,6 +1075,10 @@ func parseListeners(cfg *RawConfig) (listeners map[string]C.InboundListener, err
 		}
 
 		listeners[name] = inboundListener
+		if isIOSLowMemoryParse() {
+			cfg.Listeners[index] = nil
+			forceIOSParseGC()
+		}
 
 	}
 	return
@@ -990,6 +1088,8 @@ func parseRuleProviders(cfg *RawConfig) (ruleProviders map[string]P.RuleProvider
 	RP.SetTunnel(T.Tunnel)
 	ruleProviders = map[string]P.RuleProvider{}
 	// parse rule provider
+	total := len(cfg.RuleProvider)
+	index := 0
 	for name, mapping := range cfg.RuleProvider {
 		rp, err := RP.ParseRuleProvider(name, mapping, R.ParseRule)
 		if err != nil {
@@ -997,6 +1097,14 @@ func parseRuleProviders(cfg *RawConfig) (ruleProviders map[string]P.RuleProvider
 		}
 
 		ruleProviders[name] = rp
+		if isIOSLowMemoryParse() {
+			index++
+			delete(cfg.RuleProvider, name)
+			if index == 1 || index == total || index%8 == 0 {
+				logIOSParseStage("rule-provider %d/%d ready: %s", index, total, name)
+			}
+			forceIOSParseGC()
+		}
 	}
 	return
 }
@@ -1006,6 +1114,8 @@ func parseSubRules(cfg *RawConfig, proxies map[string]C.Proxy, ruleProviders map
 	for name := range cfg.SubRules {
 		subRules[name] = make([]C.Rule, 0)
 	}
+	total := len(cfg.SubRules)
+	index := 0
 	for name, rawRules := range cfg.SubRules {
 		if len(name) == 0 {
 			return nil, fmt.Errorf("sub-rule name is empty")
@@ -1016,6 +1126,15 @@ func parseSubRules(cfg *RawConfig, proxies map[string]C.Proxy, ruleProviders map
 			return nil, err
 		}
 		subRules[name] = rules
+		if isIOSLowMemoryParse() {
+			index++
+			cfg.SubRules[name] = nil
+			delete(cfg.SubRules, name)
+			if index == 1 || index == total || index%8 == 0 {
+				logIOSParseStage("sub-rule %d/%d ready: %s", index, total, name)
+			}
+			forceIOSParseGC()
+		}
 	}
 
 	if err = verifySubRule(subRules); err != nil {
@@ -1065,7 +1184,7 @@ func verifySubRuleCircularReferences(n string, subRules map[string][]C.Rule, arr
 }
 
 func parseRules(rulesConfig []string, proxies map[string]C.Proxy, ruleProviders map[string]P.RuleProvider, subRules map[string][]C.Rule, format string) ([]C.Rule, error) {
-	var rules []C.Rule
+	rules := make([]C.Rule, 0, len(rulesConfig))
 
 	// parse rules
 	for idx, line := range rulesConfig {
@@ -1098,6 +1217,13 @@ func parseRules(rulesConfig []string, proxies map[string]C.Proxy, ruleProviders 
 		}
 
 		rules = append(rules, parsed)
+		if isIOSLowMemoryParse() {
+			rulesConfig[idx] = ""
+		}
+		if isIOSLowMemoryParse() && ((idx+1)%64 == 0 || idx+1 == len(rulesConfig)) {
+			logIOSParseStage("%s progress %d/%d", format, idx+1, len(rulesConfig))
+			forceIOSParseGC()
+		}
 	}
 
 	return rules, nil
