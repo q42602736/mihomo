@@ -242,8 +242,20 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		TLSClientConfig:       tlsConfig,
 	}
 
+	clientTimeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			err = ctx.Err()
+			return
+		}
+		if remaining < clientTimeout {
+			clientTimeout = remaining
+		}
+	}
+
 	client := http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   clientTimeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
