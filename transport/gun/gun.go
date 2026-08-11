@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/buf"
@@ -23,7 +24,10 @@ import (
 	"github.com/metacubex/mihomo/transport/vmess"
 
 	"github.com/metacubex/http"
-	"github.com/metacubex/tls"
+)
+
+const (
+	Http2NextProtoTLS = "h2"
 )
 
 var (
@@ -51,6 +55,7 @@ type Conn struct {
 
 	closeMutex sync.Mutex
 	closed     bool
+	onClose    func()
 
 	// deadlines
 	deadline *time.Timer
@@ -103,7 +108,7 @@ func (g *Conn) read(b []byte) (n int, err error) {
 			size = len(b)
 		}
 
-		n, err = io.ReadFull(g.reader, b[:size])
+		n, err = g.reader.Read(b[:size])
 		g.remain -= n
 		return
 	}
@@ -112,6 +117,9 @@ func (g *Conn) read(b []byte) (n int, err error) {
 	var discard [6]byte
 	_, err = io.ReadFull(g.reader, discard[:])
 	if err != nil {
+		if err == io.ErrUnexpectedEOF {
+			err = io.EOF
+		}
 		return 0, err
 	}
 
@@ -206,6 +214,10 @@ func (g *Conn) Close() error {
 		}
 	}
 
+	if g.onClose != nil {
+		g.onClose()
+	}
+
 	return errors.Join(errorArr...)
 }
 
@@ -232,11 +244,12 @@ func (g *Conn) SetDeadline(t time.Time) error {
 }
 
 type Transport struct {
-	transport *http.Http2Transport
+	transport *http.Transport
 	cfg       *Config
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
+	count     atomic.Int64
 }
 
 func (t *Transport) Close() error {
@@ -248,7 +261,7 @@ func (t *Transport) Close() error {
 }
 
 func NewTransport(dialFn DialFn, tlsConfig *vmess.TLSConfig, gunCfg *Config) *Transport {
-	dialFunc := func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		ctx, cancel := context.WithTimeout(ctx, C.DefaultTLSTimeout)
 		defer cancel()
 		pconn, err := dialFn(ctx, network, addr)
@@ -266,31 +279,37 @@ func NewTransport(dialFn DialFn, tlsConfig *vmess.TLSConfig, gunCfg *Config) *Tr
 			return nil, err
 		}
 
-		if tlsConfig.Reality == nil { // reality doesn't return the negotiated ALPN
-			switch tlsConn := conn.(type) {
-			case interface{ ConnectionState() tls.ConnectionState }:
-				state := tlsConn.ConnectionState()
-				if p := state.NegotiatedProtocol; p != http.Http2NextProtoTLS {
-					_ = conn.Close()
-					return nil, fmt.Errorf("http2: unexpected ALPN protocol %s, want %s", p, http.Http2NextProtoTLS)
-				}
-			case interface{ ConnectionState() tlsC.ConnectionState }:
-				state := tlsConn.ConnectionState()
-				if p := state.NegotiatedProtocol; p != http.Http2NextProtoTLS {
-					_ = conn.Close()
-					return nil, fmt.Errorf("http2: unexpected ALPN protocol %s, want %s", p, http.Http2NextProtoTLS)
-				}
+		if tlsConfig.ShadowTLS == nil && tlsConfig.Restls == nil && tlsConfig.Reality == nil && tlsConfig.TLSMirror == nil { // shadowtls, restls, reality and tlsmirror don't return the negotiated ALPN
+			state := tlsC.GetTLSConnectionState(conn)
+			if p := state.NegotiatedProtocol; p != Http2NextProtoTLS {
+				_ = conn.Close()
+				return nil, fmt.Errorf("http2: unexpected ALPN protocol %s, want %s", p, Http2NextProtoTLS)
 			}
 		}
 		return conn, nil
 	}
 
-	transport := &http.Http2Transport{
-		DialTLSContext:     dialFunc,
-		AllowHTTP:          false,
+	// use h2c mode to disallow the net/http fallback to http1.1
+	//
+	// Note that this usage is only applicable to our own net/http fork.
+	// The standard library also needs to mask the tls.Conn type for the conn returned by DialTLSContext,
+	// see: https://github.com/golang/go/issues/79293#issuecomment-4426393534
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	transport := &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			wrapped, err := dialFunc(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return wrapped, nil
+		},
+		Protocols:          protocols,
 		DisableCompression: true,
-		ReadIdleTimeout:    time.Duration(gunCfg.PingInterval) * time.Second, // If zero, no health check is performed
-		PingTimeout:        0,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: time.Duration(gunCfg.PingInterval) * time.Second, // If zero, no health check is performed,
+			PingTimeout:     0,
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -355,6 +374,9 @@ func (t *Transport) Dial() (net.Conn, error) {
 		writer: writer,
 	}
 
+	t.count.Add(1)
+	conn.onClose = func() { t.count.Add(-1) }
+
 	go conn.Init()
 
 	// ensure conn.initOnce.Do has been called before return
@@ -362,6 +384,78 @@ func (t *Transport) Dial() (net.Conn, error) {
 	<-initStarted
 
 	return conn, nil
+}
+
+type Client struct {
+	mutex          sync.Mutex
+	maxConnections int
+	minStreams     int
+	maxStreams     int
+	transports     []*Transport
+	maker          func() *Transport
+}
+
+func NewClient(maker func() *Transport, maxConnections, minStreams, maxStreams int) *Client {
+	if maxConnections == 0 && minStreams == 0 && maxStreams == 0 {
+		maxConnections = 1
+	}
+	return &Client{
+		maxConnections: maxConnections,
+		minStreams:     minStreams,
+		maxStreams:     maxStreams,
+		maker:          maker,
+	}
+}
+
+func (c *Client) Dial() (net.Conn, error) {
+	return c.getTransport().Dial()
+}
+
+func (c *Client) Close() error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	var errs []error
+	for _, t := range c.transports {
+		if err := t.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	c.transports = nil
+	return errors.Join(errs...)
+}
+
+func (c *Client) getTransport() *Transport {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	var transport *Transport
+	for _, t := range c.transports {
+		if transport == nil || t.count.Load() < transport.count.Load() {
+			transport = t
+		}
+	}
+	if transport == nil {
+		return c.newTransportLocked()
+	}
+	numStreams := int(transport.count.Load())
+	if numStreams == 0 {
+		return transport
+	}
+	if c.maxConnections > 0 {
+		if len(c.transports) >= c.maxConnections || numStreams < c.minStreams {
+			return transport
+		}
+	} else {
+		if c.maxStreams > 0 && numStreams < c.maxStreams {
+			return transport
+		}
+	}
+	return c.newTransportLocked()
+}
+
+func (c *Client) newTransportLocked() *Transport {
+	transport := c.maker()
+	c.transports = append(c.transports, transport)
+	return transport
 }
 
 func StreamGunWithConn(conn net.Conn, tlsConfig *vmess.TLSConfig, gunCfg *Config) (net.Conn, error) {

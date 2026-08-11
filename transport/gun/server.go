@@ -5,17 +5,13 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/metacubex/mihomo/common/buf"
 	"github.com/metacubex/mihomo/common/httputils"
 	N "github.com/metacubex/mihomo/common/net"
 
 	"github.com/metacubex/http"
-	"github.com/metacubex/http/h2c"
 )
-
-const idleTimeout = 30 * time.Second
 
 type ServerOption struct {
 	ServiceName string
@@ -30,9 +26,7 @@ func NewServerHandler(options ServerOption) http.Handler {
 	if httpHandler == nil {
 		httpHandler = http.NewServeMux()
 	}
-	// using h2c.NewHandler to ensure we can work in plain http2
-	// and some tls conn is not *tls.Conn (like *reality.Conn)
-	return h2c.NewHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == path &&
 			request.Method == http.MethodPost &&
 			strings.HasPrefix(request.Header.Get("Content-Type"), "application/grpc") {
@@ -62,8 +56,6 @@ func NewServerHandler(options ServerOption) http.Handler {
 		}
 
 		httpHandler.ServeHTTP(writer, request)
-	}), &http.Http2Server{
-		IdleTimeout: idleTimeout,
 	})
 }
 
@@ -96,11 +88,6 @@ func (w *h2ConnWrapper) CloseWrapper() {
 	w.access.Lock()
 	defer w.access.Unlock()
 	w.closed = true
-}
-
-func (w *h2ConnWrapper) Close() error {
-	w.CloseWrapper()
-	return w.ExtendedConn.Close()
 }
 
 func (w *h2ConnWrapper) Upstream() any {
